@@ -10,12 +10,13 @@ from typing import Any
 try:
     import numpy as np
 except ImportError:
-    np = None  # numpy only needed for vector search features
+    np = None
 
 from minutes.models import ExtractionResult
+from minutes.store_schema import init_pragmas, init_schema, migrate
+from minutes.store_search import _rrf_merge, get_all_embeddings, search_keyword, search_vector
 
 
-# Category → (content_field, detail_field, owner_field)
 _CATEGORY_FIELDS = {
     "decision": ("summary", "rationale", "owner"),
     "idea": ("title", "description", None),
@@ -34,96 +35,9 @@ class MinutesStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.execute("PRAGMA cache_size=10000")
-        self.conn.execute("PRAGMA temp_store=MEMORY")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self._migrate()
-        self._init_schema()
-
-    def _migrate(self) -> None:  # noqa: D102
-        """Migrate old schema if needed. Never drops data — uses rename-copy-drop."""
-        cursor = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='item_embeddings'"
-        )
-        if cursor.fetchone() is not None:
-            cols = [r[1] for r in self.conn.execute("PRAGMA table_info(item_embeddings)").fetchall()]
-            if "model" not in cols:
-                # Old schema (no model column) → migrate data to new composite PK
-                self.conn.executescript("""
-                    ALTER TABLE item_embeddings RENAME TO item_embeddings_old;
-
-                    CREATE TABLE item_embeddings (
-                        item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-                        model TEXT NOT NULL DEFAULT 'all-mpnet-base-v2',
-                        embedding BLOB NOT NULL,
-                        PRIMARY KEY (item_id, model)
-                    );
-
-                    INSERT INTO item_embeddings (item_id, model, embedding)
-                    SELECT item_id, 'all-MiniLM-L6-v2', embedding
-                    FROM item_embeddings_old;
-
-                    DROP TABLE item_embeddings_old;
-                """)
-
-    def _init_schema(self) -> None:  # noqa: D102
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                project_key TEXT NOT NULL,
-                input_file TEXT NOT NULL,
-                output_file TEXT,
-                file_hash TEXT,
-                extracted_at TEXT,
-                file_size INTEGER,
-                message_count INTEGER,
-                transcript_chars INTEGER,
-                decisions INTEGER DEFAULT 0,
-                ideas INTEGER DEFAULT 0,
-                questions INTEGER DEFAULT 0,
-                action_items INTEGER DEFAULT 0,
-                concepts INTEGER DEFAULT 0,
-                terms INTEGER DEFAULT 0,
-                tldr TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                category TEXT NOT NULL,
-                content TEXT NOT NULL,
-                detail TEXT,
-                owner TEXT,
-                date TEXT,
-                UNIQUE(session_id, category, content)
-            );
-
-            CREATE TABLE IF NOT EXISTS item_embeddings (
-                item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
-                model TEXT NOT NULL DEFAULT 'all-mpnet-base-v2',
-                embedding BLOB NOT NULL,
-                PRIMARY KEY (item_id, model)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_items_session ON items(session_id);
-            CREATE INDEX IF NOT EXISTS idx_items_category ON items(category);
-            CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_key);
-        """)
-
-        # FTS5 virtual table — standalone (not content-synced) for simplicity
-        cursor = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='items_fts'"
-        )
-        if cursor.fetchone() is None:
-            self.conn.execute("""
-                CREATE VIRTUAL TABLE items_fts USING fts5(
-                    content, detail
-                )
-            """)
-
-        self.conn.commit()
+        init_pragmas(self.conn)
+        migrate(self.conn)
+        init_schema(self.conn)
 
     def upsert_session(
         self,
@@ -237,42 +151,11 @@ class MinutesStore:
 
     def search_keyword(self, query: str, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:  # noqa: D102
         """Full-text search via FTS5."""
-        sql = """
-            SELECT i.id, i.session_id, i.category, i.content, i.detail, i.owner,
-                   f.rank AS score
-            FROM items_fts f
-            JOIN items i ON i.id = f.rowid
-            WHERE items_fts MATCH ?
-        """
-        params: list = [query]
-
-        if category:
-            sql += " AND i.category = ?"
-            params.append(category)
-
-        sql += " ORDER BY f.rank LIMIT ?"
-        params.append(limit)
-
-        rows = self.conn.execute(sql, params).fetchall()
-        return [dict(r) for r in rows]
+        return search_keyword(self.conn, query, category=category, limit=limit)
 
     def get_all_embeddings(self, model: str = "all-mpnet-base-v2") -> tuple[list[int], Any]:  # noqa: D102
         """Load all item embeddings for a given model into a numpy matrix."""
-        cursor = self.conn.execute(
-            "SELECT item_id, embedding FROM item_embeddings WHERE model = ? ORDER BY item_id",
-            (model,),
-        )
-        rows = cursor.fetchall()
-        if not rows:
-            return [], np.array([], dtype=np.float32)
-
-        item_ids = []
-        embeddings = []
-        for item_id, embedding_bytes in rows:
-            item_ids.append(item_id)
-            embeddings.append(np.frombuffer(embedding_bytes, dtype=np.float32))
-
-        return item_ids, np.stack(embeddings, axis=0)
+        return get_all_embeddings(self.conn, model=model)
 
     def store_embeddings(self, item_ids: list[int], embeddings: Any, model: str = "all-mpnet-base-v2") -> None:  # noqa: D102
         """Store embeddings as float32 BLOBs."""
@@ -311,60 +194,14 @@ class MinutesStore:
         model: str = "all-mpnet-base-v2",
     ) -> list[dict[str, Any]]:  # noqa: D102
         """Vector similarity search using FAISS IndexFlatIP."""
-        try:
-            import faiss
-        except ImportError:
-            raise ImportError(
-                "faiss-cpu is required for vector search. "
-                "Install search extras: pip install 'take-minutes[search]'"
-            )
-
-        item_ids, embeddings = self.get_all_embeddings(model=model)
-        if len(embeddings) == 0:
-            return []
-
-        # Filter by category if needed
-        if category:
-            rows = self.conn.execute(
-                "SELECT e.item_id FROM item_embeddings e "
-                "JOIN items i ON i.id = e.item_id WHERE i.category = ?",
-                (category,),
-            ).fetchall()
-            valid_ids = {r["item_id"] for r in rows}
-            mask = [i for i, iid in enumerate(item_ids) if iid in valid_ids]
-            if not mask:
-                return []
-            item_ids = [item_ids[i] for i in mask]
-            embeddings = embeddings[mask]
-
-        # Normalize
-        query_norm = np.linalg.norm(query_embedding)
-        if query_norm == 0:
-            return []
-        q = (query_embedding / query_norm).reshape(1, -1).astype(np.float32)
-
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-        norms[norms == 0] = 1
-        normed = (embeddings / norms).astype(np.float32)
-
-        # Build ephemeral FAISS index
-        d = normed.shape[1]
-        index = faiss.IndexFlatIP(d)
-        index.add(np.ascontiguousarray(normed))
-
-        k = min(limit, len(item_ids))
-        scores, indices = index.search(q, k)
-
-        results = []
-        for i in range(k):
-            idx = int(indices[0][i])
-            if idx >= 0:
-                item = self.get_item(item_ids[idx])
-                if item:
-                    item["score"] = float(scores[0][i])
-                    results.append(item)
-
-        return results
+        return search_vector(
+            self.conn,
+            query_embedding,
+            category=category,
+            limit=limit,
+            model=model,
+            get_item_func=self.get_item,
+        )
 
     def search_hybrid(
         self,
@@ -430,32 +267,3 @@ class MinutesStore:
 
     def close(self) -> None:  # noqa: D102
         self.conn.close()
-
-
-def _rrf_merge(ranked_lists: list[list[dict[str, Any]]], k: int = 60) -> list[dict[str, Any]]:  # noqa: D103
-    """Reciprocal Rank Fusion — merge multiple ranked lists."""
-    score_map: dict[int, float] = {}
-    item_map: dict[int, dict[str, Any]] = {}
-
-    for ranked_list in ranked_lists:
-        for rank, item in enumerate(ranked_list, start=1):
-            item_id = item["id"]
-            reciprocal = 1.0 / (k + rank)
-
-            if item_id not in score_map:
-                score_map[item_id] = 0.0
-                item_map[item_id] = item
-            else:
-                item_map[item_id].update(item)
-
-            score_map[item_id] += reciprocal
-
-    sorted_results = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
-
-    output = []
-    for item_id, score in sorted_results:
-        result = item_map[item_id].copy()
-        result["rrf_score"] = score
-        output.append(result)
-
-    return output
