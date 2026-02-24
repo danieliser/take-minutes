@@ -3,22 +3,32 @@
 Handles JSONL (Claude Code interaction logs) and plain text formats.
 Filters infrastructure noise: tool results, system reminders, teammate
 protocol messages, compaction summaries, and other non-conversation content.
+
+All filters are configurable via FilterConfig — pass filter_config=None
+to disable all filtering, or customize individual flags.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
-# Message types that are never conversation content
-SKIP_MESSAGE_TYPES = frozenset({
+# Message types that are infrastructure, not conversation
+DEFAULT_SKIP_TYPES = frozenset({
     "progress",
     "system",
     "file-history-snapshot",
     "queue-operation",
+})
+
+# Content block types to drop from message content lists
+DEFAULT_SKIP_CONTENT_TYPES = frozenset({
+    "tool_use",
+    "tool_result",
 })
 
 # Regex patterns for inline noise in text content
@@ -42,10 +52,59 @@ _TEAMMATE_PROTOCOL_PATTERNS = (
 )
 
 
-def _strip_inline_noise(text: str) -> str:
-    """Remove system-reminder tags, teammate messages, and protocol JSON from text."""
-    text = _SYSTEM_REMINDER_RE.sub("", text)
-    text = _TEAMMATE_MSG_RE.sub("", text)
+@dataclass
+class FilterConfig:
+    """Configuration for JSONL transcript noise filtering.
+
+    All filters default to True (enabled). Set to False to keep that content.
+    Pass filter_config=None to parse_jsonl() to disable ALL filtering.
+    """
+
+    skip_message_types: bool = True
+    """Drop entire messages with types like progress, system, file-history-snapshot."""
+
+    skip_content_types: bool = True
+    """Drop tool_use and tool_result content blocks from messages."""
+
+    strip_system_reminders: bool = True
+    """Remove <system-reminder> tags from text content."""
+
+    strip_teammate_tags: bool = True
+    """Remove <teammate-message> tags from text content."""
+
+    filter_protocol_messages: bool = True
+    """Drop messages that are pure teammate protocol JSON (idle, shutdown)."""
+
+    filter_compaction: bool = True
+    """Drop compaction/context compression summary messages."""
+
+    message_types_to_skip: frozenset[str] = field(default_factory=lambda: DEFAULT_SKIP_TYPES)
+    """Which message types to drop (only used when skip_message_types=True)."""
+
+    content_types_to_skip: frozenset[str] = field(default_factory=lambda: DEFAULT_SKIP_CONTENT_TYPES)
+    """Which content block types to drop (only used when skip_content_types=True)."""
+
+
+# Default config instance — all filters on
+DEFAULT_FILTERS = FilterConfig()
+
+# No-filter config — keeps everything
+NO_FILTERS = FilterConfig(
+    skip_message_types=False,
+    skip_content_types=False,
+    strip_system_reminders=False,
+    strip_teammate_tags=False,
+    filter_protocol_messages=False,
+    filter_compaction=False,
+)
+
+
+def _strip_inline_noise(text: str, config: FilterConfig) -> str:
+    """Remove inline noise tags from text based on config."""
+    if config.strip_system_reminders:
+        text = _SYSTEM_REMINDER_RE.sub("", text)
+    if config.strip_teammate_tags:
+        text = _TEAMMATE_MSG_RE.sub("", text)
     return text.strip()
 
 
@@ -54,7 +113,6 @@ def _is_protocol_message(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    # Check for JSON protocol messages
     for pattern in _TEAMMATE_PROTOCOL_PATTERNS:
         if pattern in stripped:
             return True
@@ -63,7 +121,6 @@ def _is_protocol_message(text: str) -> bool:
 
 def _is_compaction_summary(obj: dict[str, Any]) -> bool:
     """Detect compaction/context compression messages."""
-    # Check for compact_boundary system subtype
     if obj.get("type") == "system" and obj.get("subtype") == "compact_boundary":
         return True
 
@@ -73,7 +130,6 @@ def _is_compaction_summary(obj: dict[str, Any]) -> bool:
 
     content = message.get("content")
     if isinstance(content, str):
-        # Look for compaction markers in text
         if "conversation that ran out of context" in content.lower():
             return True
         if "context was compressed" in content.lower():
@@ -90,18 +146,16 @@ def _is_compaction_summary(obj: dict[str, Any]) -> bool:
     return False
 
 
-def parse_jsonl(file_path: str) -> tuple[str, dict[str, Any]]:
+def parse_jsonl(
+    file_path: str,
+    filter_config: FilterConfig | None = DEFAULT_FILTERS,
+) -> tuple[str, dict[str, Any]]:
     """Parse a JSONL file containing Claude Code interaction logs.
-
-    Extracts user and assistant messages, filtering out:
-    - Non-message events (progress, system, file-history-snapshot, queue-operation)
-    - Tool use and tool result content blocks
-    - System-reminder and teammate-message inline tags
-    - Teammate protocol messages (idle notifications, shutdown requests)
-    - Compaction/context compression summaries
 
     Args:
         file_path: Path to the JSONL file
+        filter_config: Noise filtering configuration. Pass None to disable all
+            filtering. Defaults to DEFAULT_FILTERS (all filters enabled).
 
     Returns:
         Tuple of (consolidated_text, metadata_dict) where metadata_dict contains:
@@ -110,6 +164,9 @@ def parse_jsonl(file_path: str) -> tuple[str, dict[str, Any]]:
         - "skipped": count of unparseable lines
         - "format": "jsonl"
     """
+    # Use no-filter config if None passed
+    config = filter_config if filter_config is not None else NO_FILTERS
+
     messages: list[str] = []
     bad_lines = 0
     filtered = 0
@@ -128,12 +185,12 @@ def parse_jsonl(file_path: str) -> tuple[str, dict[str, Any]]:
 
             # Skip non-message event types
             msg_type = obj.get("type", "")
-            if msg_type in SKIP_MESSAGE_TYPES:
+            if config.skip_message_types and msg_type in config.message_types_to_skip:
                 filtered += 1
                 continue
 
             # Skip compaction summaries
-            if _is_compaction_summary(obj):
+            if config.filter_compaction and _is_compaction_summary(obj):
                 filtered += 1
                 continue
 
@@ -159,25 +216,29 @@ def parse_jsonl(file_path: str) -> tuple[str, dict[str, Any]]:
             if isinstance(content, str):
                 text = content
             elif isinstance(content, list):
-                # Filter to only text blocks — skip tool_use, tool_result, and other types
                 text_parts: list[str] = []
                 for block in content:
                     if isinstance(block, dict):
                         block_type = block.get("type", "")
                         if block_type == "text":
                             text_parts.append(block.get("text", ""))
-                        # Skip: tool_use, tool_result, image, etc.
+                        elif config.skip_content_types and block_type in config.content_types_to_skip:
+                            continue  # Skip filtered content types
+                        else:
+                            # Keep unrecognized block types as-is if not filtering
+                            if not config.skip_content_types:
+                                text_parts.append(json.dumps(block))
                 text = "".join(text_parts)
 
-            # Strip inline noise (system-reminders, teammate tags)
-            text = _strip_inline_noise(text)
+            # Strip inline noise
+            text = _strip_inline_noise(text, config)
 
             # Skip empty messages or pure protocol messages
             if not text or not text.strip():
                 filtered += 1
                 continue
 
-            if _is_protocol_message(text):
+            if config.filter_protocol_messages and _is_protocol_message(text):
                 filtered += 1
                 continue
 
@@ -218,7 +279,10 @@ def parse_text(file_path: str) -> tuple[str, dict[str, Any]]:
     return contents, metadata
 
 
-def parse_file(file_path: str) -> tuple[str, dict[str, Any]]:
+def parse_file(
+    file_path: str,
+    filter_config: FilterConfig | None = DEFAULT_FILTERS,
+) -> tuple[str, dict[str, Any]]:
     """Auto-detect file format and parse accordingly.
 
     Supports:
@@ -228,6 +292,7 @@ def parse_file(file_path: str) -> tuple[str, dict[str, Any]]:
 
     Args:
         file_path: Path to the file
+        filter_config: Noise filtering configuration for JSONL files.
 
     Returns:
         Tuple of (content, metadata_dict)
@@ -240,21 +305,18 @@ def parse_file(file_path: str) -> tuple[str, dict[str, Any]]:
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    # Check extension
     suffix = path.suffix.lower()
 
     if suffix == ".jsonl":
-        return parse_jsonl(file_path)
+        return parse_jsonl(file_path, filter_config=filter_config)
     elif suffix in (".txt", ".md", ".markdown"):
         return parse_text(file_path)
     else:
         # Unknown extension: try JSONL first, fall back to text
         try:
-            text, metadata = parse_jsonl(file_path)
-            # If we successfully parsed at least one message, treat as JSONL
+            text, metadata = parse_jsonl(file_path, filter_config=filter_config)
             if metadata.get("messages", 0) > 0:
                 return text, metadata
         except (json.JSONDecodeError, UnicodeDecodeError):
             pass
-        # Fall back to text parsing
         return parse_text(file_path)

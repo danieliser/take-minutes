@@ -3,7 +3,10 @@
 import json
 import pytest
 from pathlib import Path
-from minutes.parser import parse_jsonl, parse_text, parse_file
+from minutes.parser import (
+    parse_jsonl, parse_text, parse_file,
+    FilterConfig, DEFAULT_FILTERS, NO_FILTERS,
+)
 
 
 @pytest.fixture
@@ -370,6 +373,154 @@ class TestFilters:
 
         assert metadata["messages"] == 1
         assert metadata["filtered"] >= 4
+
+
+class TestFilterConfig:
+    """Tests for FilterConfig configurability."""
+
+    def _make_noisy_jsonl(self, tmp_path):
+        """Create a JSONL file with all noise types for filter testing."""
+        lines = [
+            # progress message
+            '{"type": "progress", "data": {"type": "hook_progress"}}',
+            # file-history-snapshot
+            '{"type": "file-history-snapshot", "snapshot": {}}',
+            # compaction summary
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "text", "text": "This session is being continued from a previous conversation that ran out of context."},
+                ]},
+            }),
+            # user message with tool_result + system-reminder + real text
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "file contents here"},
+                    {"type": "text", "text": "Fix the bug.<system-reminder>Use task tools.</system-reminder> Thanks."},
+                ]},
+            }),
+            # assistant with tool_use + real text
+            json.dumps({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "I'll fix that now."},
+                    {"type": "tool_use", "id": "t2", "name": "Edit", "input": {"file": "foo.py"}},
+                ]},
+            }),
+            # teammate protocol message
+            json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": '{"type":"idle_notification","from":"reviewer"}'},
+            }),
+        ]
+        f = tmp_path / "noisy.jsonl"
+        f.write_text("\n".join(lines) + "\n")
+        return f
+
+    def test_default_filters_strip_all_noise(self, tmp_path):
+        """DEFAULT_FILTERS removes all noise, keeps only conversation."""
+        f = self._make_noisy_jsonl(tmp_path)
+        text, meta = parse_jsonl(str(f), filter_config=DEFAULT_FILTERS)
+
+        assert meta["messages"] == 2
+        assert "Fix the bug." in text
+        assert "Thanks." in text
+        assert "I'll fix that now." in text
+        # Noise is gone
+        assert "file contents here" not in text
+        assert "system-reminder" not in text
+        assert "tool_use" not in text
+        assert "idle_notification" not in text
+        assert "ran out of context" not in text
+
+    def test_no_filters_keeps_everything(self, tmp_path):
+        """NO_FILTERS keeps all content including noise."""
+        f = self._make_noisy_jsonl(tmp_path)
+        text, meta = parse_jsonl(str(f), filter_config=NO_FILTERS)
+
+        # Should keep tool_result content, system-reminders, protocol, compaction
+        assert "file contents here" in text
+        assert "system-reminder" in text or "Use task tools." in text
+        assert "idle_notification" in text
+        assert "ran out of context" in text
+        assert meta["messages"] > 2
+
+    def test_none_config_equals_no_filters(self, tmp_path):
+        """filter_config=None disables all filtering."""
+        f = self._make_noisy_jsonl(tmp_path)
+        text_none, meta_none = parse_jsonl(str(f), filter_config=None)
+        text_no, meta_no = parse_jsonl(str(f), filter_config=NO_FILTERS)
+
+        assert text_none == text_no
+        assert meta_none["messages"] == meta_no["messages"]
+
+    def test_keep_tool_results_only(self, tmp_path):
+        """Can keep tool_result blocks while filtering other noise."""
+        f = self._make_noisy_jsonl(tmp_path)
+        config = FilterConfig(skip_content_types=False)
+        text, meta = parse_jsonl(str(f), filter_config=config)
+
+        # tool_result content kept
+        assert "file contents here" in text
+        # Other filters still active
+        assert "idle_notification" not in text
+        assert "system-reminder" not in text
+
+    def test_keep_system_reminders(self, tmp_path):
+        """Can keep system-reminder tags while filtering other noise."""
+        f = self._make_noisy_jsonl(tmp_path)
+        config = FilterConfig(strip_system_reminders=False)
+        text, meta = parse_jsonl(str(f), filter_config=config)
+
+        assert "system-reminder" in text or "Use task tools." in text
+        # tool_result still filtered
+        assert "file contents here" not in text
+
+    def test_keep_compaction_summaries(self, tmp_path):
+        """Can keep compaction summaries while filtering other noise."""
+        f = self._make_noisy_jsonl(tmp_path)
+        config = FilterConfig(filter_compaction=False)
+        text, meta = parse_jsonl(str(f), filter_config=config)
+
+        assert "ran out of context" in text
+
+    def test_keep_protocol_messages(self, tmp_path):
+        """Can keep teammate protocol messages while filtering other noise."""
+        f = self._make_noisy_jsonl(tmp_path)
+        config = FilterConfig(filter_protocol_messages=False)
+        text, meta = parse_jsonl(str(f), filter_config=config)
+
+        assert "idle_notification" in text
+
+    def test_keep_message_types(self, tmp_path):
+        """Can keep progress/system messages while filtering other noise."""
+        f = self._make_noisy_jsonl(tmp_path)
+        config = FilterConfig(skip_message_types=False)
+        text, meta = parse_jsonl(str(f), filter_config=config)
+
+        # Progress messages don't have message.content, so they still get filtered
+        # by the "must have message dict" check. But the type filter itself is off.
+        assert meta["filtered"] < 6  # fewer things filtered than default
+
+    def test_parse_file_passes_filter_config(self, tmp_path):
+        """parse_file forwards filter_config to parse_jsonl."""
+        f = tmp_path / "test.jsonl"
+        f.write_text(json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "KEPT"},
+                {"type": "text", "text": "hello"},
+            ]},
+        }) + "\n")
+
+        # Default: tool_result filtered
+        text_default, _ = parse_file(str(f))
+        assert "KEPT" not in text_default
+
+        # NO_FILTERS: tool_result kept
+        text_raw, _ = parse_file(str(f), filter_config=NO_FILTERS)
+        assert "KEPT" in text_raw
 
 
 class TestParseText:

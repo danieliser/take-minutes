@@ -23,7 +23,7 @@ from minutes.output import (
     write_session_markdown,
 )
 from minutes.glossary import load_glossary, match_terms
-from minutes.parser import parse_file
+from minutes.parser import parse_file, NO_FILTERS
 
 # Set up logging
 logging.basicConfig(
@@ -43,8 +43,9 @@ def main() -> None:  # noqa: D103
 @click.argument('file', type=click.Path(exists=False))
 @click.option('--output', '-o', type=click.Path(), help='Output directory')
 @click.option('--no-dedup', is_flag=True, help='Skip deduplication check')
+@click.option('--raw', is_flag=True, help='Disable noise filters (keep tool results, system reminders, etc.)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-def process(file: str, output: str | None, no_dedup: bool, verbose: bool) -> None:  # noqa: D103
+def process(file: str, output: str | None, no_dedup: bool, raw: bool, verbose: bool) -> None:  # noqa: D103
     """Process a transcript and extract structured knowledge.
 
     \b
@@ -72,8 +73,9 @@ def process(file: str, output: str | None, no_dedup: bool, verbose: bool) -> Non
             sys.exit(5)
 
         # Parse input file
+        filter_config = NO_FILTERS if raw else None
         try:
-            text, metadata = parse_file(file)
+            text, metadata = parse_file(file, filter_config=filter_config)
         except FileNotFoundError as e:
             click.secho(f"Error: {e}", fg='red', err=True)
             sys.exit(1)
@@ -513,8 +515,9 @@ def _find_main_sessions(
 @click.option('--dry-run', is_flag=True, help='Show what would be processed')
 @click.option('--no-embed', is_flag=True, help='Skip embedding generation')
 @click.option('--sort', type=click.Choice(['date', 'date-asc', 'size', 'size-asc', 'project']), default='date', help='Sort order for sessions')
+@click.option('--raw', is_flag=True, help='Disable noise filters (keep tool results, system reminders, etc.)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-def batch(project: str | None, since: str | None, min_size: str, output: str | None, dry_run: bool, no_embed: bool, sort: str, verbose: bool) -> None:  # noqa: D103
+def batch(project: str | None, since: str | None, min_size: str, output: str | None, dry_run: bool, no_embed: bool, sort: str, raw: bool, verbose: bool) -> None:  # noqa: D103
     """Batch process historical session transcripts.
 
     Scans ~/.claude/projects/ for main-thread JSONL files, extracts structured
@@ -609,7 +612,8 @@ def batch(project: str | None, since: str | None, min_size: str, output: str | N
         click.echo(f"  Processing: {session_file.name} ({session_file.stat().st_size / 1024:.0f}KB)")
 
         try:
-            text, metadata = parse_file(str(session_file))
+            batch_filter = NO_FILTERS if raw else None
+            text, metadata = parse_file(str(session_file), filter_config=batch_filter)
             result = process_transcript(backend, config, text)
 
             # Write markdown
