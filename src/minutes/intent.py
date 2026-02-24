@@ -85,8 +85,12 @@ def summarize_intent(backend, prompts: list[str]) -> IntentSummary:
     )
 
     try:
-        response = backend.chat.completions.create(
-            model=backend._model if hasattr(backend, "_model") else "default",
+        # Support both raw OpenAI client and GatewayBackend wrapper
+        client = getattr(backend, 'client', backend)
+        model = getattr(backend, 'model', "default")
+
+        response = client.chat.completions.create(
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": concatenated},
@@ -95,7 +99,10 @@ def summarize_intent(backend, prompts: list[str]) -> IntentSummary:
         )
 
         response_text = response.choices[0].message.content
-        data = json.loads(response_text)
+        # Strip markdown code fences if present
+        from minutes.extractor_chunking import extract_json_block
+        json_text = extract_json_block(response_text) or response_text
+        data = json.loads(json_text)
 
         return IntentSummary(
             primary_goal=data.get("primary_goal", ""),

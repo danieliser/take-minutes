@@ -198,8 +198,8 @@ class TestSummarizeIntent:
     def test_summarize_intent_calls_backend(self):
         """Verify backend is called for non-empty prompts."""
         backend = MagicMock()
-        backend._model = "test-model"
-        backend.chat.completions.create.return_value.choices[0].message.content = json.dumps({
+        backend.model = "test-model"
+        backend.client.chat.completions.create.return_value.choices[0].message.content = json.dumps({
             "primary_goal": "Build a feature",
             "sub_goals": ["Task 1", "Task 2"],
             "constraints": ["2 hours"],
@@ -212,13 +212,13 @@ class TestSummarizeIntent:
         assert result.primary_goal == "Build a feature"
         assert result.sub_goals == ["Task 1", "Task 2"]
         assert result.constraints == ["2 hours"]
-        backend.chat.completions.create.assert_called_once()
+        backend.client.chat.completions.create.assert_called_once()
 
     def test_summarize_intent_uses_model_attribute(self):
-        """Verify backend._model is used if available."""
+        """Verify backend.model is used if available."""
         backend = MagicMock()
-        backend._model = "custom-model"
-        backend.chat.completions.create.return_value.choices[0].message.content = json.dumps({
+        backend.model = "custom-model"
+        backend.client.chat.completions.create.return_value.choices[0].message.content = json.dumps({
             "primary_goal": "Test",
             "sub_goals": [],
             "constraints": [],
@@ -226,16 +226,13 @@ class TestSummarizeIntent:
 
         summarize_intent(backend, ["prompt"])
 
-        call_args = backend.chat.completions.create.call_args
+        call_args = backend.client.chat.completions.create.call_args
         assert call_args[1]["model"] == "custom-model"
 
     def test_summarize_intent_uses_default_model_if_no_attribute(self):
-        """Verify 'default' model is used if backend has no _model."""
-        backend = MagicMock(spec=['chat'])
-        # Remove _model attribute to simulate missing model
-        if hasattr(backend, '_model'):
-            delattr(backend, '_model')
-        backend.chat.completions.create.return_value.choices[0].message.content = json.dumps({
+        """Verify 'default' model is used if backend has no model attr."""
+        backend = MagicMock(spec=['client'])
+        backend.client.chat.completions.create.return_value.choices[0].message.content = json.dumps({
             "primary_goal": "Test",
             "sub_goals": [],
             "constraints": [],
@@ -243,13 +240,13 @@ class TestSummarizeIntent:
 
         summarize_intent(backend, ["prompt"])
 
-        call_args = backend.chat.completions.create.call_args
+        call_args = backend.client.chat.completions.create.call_args
         assert call_args[1]["model"] == "default"
 
     def test_summarize_intent_handles_exceptions(self):
         """Verify exceptions return empty result with prompt count."""
         backend = Mock()
-        backend.chat.completions.create.side_effect = Exception("LLM error")
+        backend.client.chat.completions.create.side_effect = Exception("LLM error")
 
         prompts = ["Prompt 1"]
         result = summarize_intent(backend, prompts)
@@ -262,8 +259,8 @@ class TestSummarizeIntent:
     def test_summarize_intent_chunks_large_prompts(self):
         """Verify large prompt concatenation is chunked."""
         backend = MagicMock()
-        backend._model = "test-model"
-        backend.chat.completions.create.return_value.choices[0].message.content = json.dumps({
+        backend.model = "test-model"
+        backend.client.chat.completions.create.return_value.choices[0].message.content = json.dumps({
             "primary_goal": "Test",
             "sub_goals": [],
             "constraints": [],
@@ -273,7 +270,7 @@ class TestSummarizeIntent:
         large_prompts = ["x" * (INTENT_CHUNK_SIZE // 5) for _ in range(10)]
         result = summarize_intent(backend, large_prompts)
 
-        call_args = backend.chat.completions.create.call_args
+        call_args = backend.client.chat.completions.create.call_args
         user_content = call_args[1]["messages"][1]["content"]
         # Should contain omission marker since it was chunked
         assert "[" in user_content and "prompts omitted" in user_content
