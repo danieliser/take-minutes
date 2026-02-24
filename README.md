@@ -1,5 +1,10 @@
 # minutes
 
+[![PyPI](https://img.shields.io/pypi/v/take-minutes)](https://pypi.org/project/take-minutes)
+[![Python](https://img.shields.io/pypi/pyversions/take-minutes)](https://pypi.org/project/take-minutes)
+[![Tests](https://github.com/danieliser/take-minutes/actions/workflows/test.yml/badge.svg)](https://github.com/danieliser/take-minutes/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > Distill any conversation into structured knowledge.
 
 Local-first CLI for extracting decisions, ideas, questions, action items, concepts, and key terms from any conversation transcript. Works with Claude Code sessions, meeting transcripts, plain text, and markdown. Runs entirely offline with a local LLM—nothing leaves your machine.
@@ -7,7 +12,13 @@ Local-first CLI for extracting decisions, ideas, questions, action items, concep
 ## Quick Start
 
 ```bash
+# Using uv (recommended)
+uv tool install take-minutes
+
+# Or with pip
 pip install take-minutes
+
+# Run it
 minutes process my-session.jsonl
 ```
 
@@ -42,11 +53,19 @@ For best results: use a 4B–7B model (e.g., Qwen 2.5 7B, Llama 3 8B).
 
 ### Core (extraction only)
 ```bash
+# Using uv (recommended)
+uv tool install take-minutes
+
+# Or with pip
 pip install take-minutes
 ```
 
 ### With semantic search
 ```bash
+# Using uv
+uv tool install "take-minutes[search]"
+
+# Or with pip
 pip install "take-minutes[search]"
 ```
 

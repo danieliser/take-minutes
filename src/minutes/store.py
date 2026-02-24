@@ -34,6 +34,9 @@ class MinutesStore:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA cache_size=10000")
+        self.conn.execute("PRAGMA temp_store=MEMORY")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self._migrate()
         self._init_schema()

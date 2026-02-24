@@ -1,9 +1,9 @@
 [project]
 name = "take-minutes"
-version = "0.1.1"
+dynamic = ["version"]
 description = "Extract structured knowledge from conversation transcripts"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 authors = [{name = "Daniel Iser"}]
 requires-python = ">=3.10"
 classifiers = [
@@ -41,11 +41,14 @@ dev = ["pytest>=7.0"]
 minutes = "minutes.cli:main"
 
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.version]
+path = "src/minutes/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/minutes"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
