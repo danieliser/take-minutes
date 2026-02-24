@@ -45,7 +45,11 @@ def main() -> None:  # noqa: D103
 @click.option('--no-dedup', is_flag=True, help='Skip deduplication check')
 @click.option('--raw', is_flag=True, help='Disable noise filters (keep tool results, system reminders, etc.)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-def process(file: str, output: str | None, no_dedup: bool, raw: bool, verbose: bool) -> None:  # noqa: D103
+@click.option('--mode', type=click.Choice(['extract', 'changes', 'intent', 'stats']), default='extract', help='Extraction mode: extract (default knowledge extraction), changes (code change timeline), intent (user goal summary), stats (tool call statistics)')
+@click.option('--detail', is_flag=True, help='Include full tool call log (only with --mode stats)')
+@click.option('--full', is_flag=True, help='Disable output truncation (only with --mode changes)')
+@click.option('--strict', is_flag=True, help='Fail on malformed JSONL instead of skipping bad lines')
+def process(file: str, output: str | None, no_dedup: bool, raw: bool, verbose: bool, mode: str, detail: bool, full: bool, strict: bool) -> None:  # noqa: D103
     """Process a transcript and extract structured knowledge.
 
     \b
@@ -63,6 +67,73 @@ def process(file: str, output: str | None, no_dedup: bool, raw: bool, verbose: b
             config.output_dir = output
         if verbose:
             config.verbose = verbose
+
+        # Handle new extraction modes (v0.4.0)
+        if mode != 'extract':
+            # Validate JSONL input
+            if not file.endswith('.jsonl'):
+                click.secho(f"Error: --mode {mode} requires a JSONL file. Got: {Path(file).name}", fg='red', err=True)
+                sys.exit(1)
+
+            if not Path(file).exists():
+                click.secho(f"Error: File not found: {file}", fg='red', err=True)
+                sys.exit(1)
+
+            # Warn about incompatible flags
+            if detail and mode != 'stats':
+                click.secho("Warning: --detail has no effect without --mode stats. Ignored.", fg='yellow', err=True)
+
+            output_dir = Path(output) if output else Path(config.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stem = Path(file).stem
+
+            if mode == 'changes':
+                from minutes.changes import parse_changes, format_changes_markdown
+                timeline = parse_changes(file, strict=strict)
+                markdown = format_changes_markdown(timeline, Path(file).name, full=full)
+                out_file = output_dir / f"{stem}-changes.md"
+                out_file.write_text(markdown)
+                click.secho(f"✓ Changes extracted: {timeline.total_edits} edits, {timeline.total_writes} writes", fg='green')
+                click.echo(f"  Files modified: {len(timeline.files_modified)}")
+                click.echo(f"  Output: {out_file}")
+
+            elif mode == 'stats':
+                from minutes.changes import collect_stats, format_stats_markdown
+                stats = collect_stats(file, detail=detail, strict=strict)
+                markdown = format_stats_markdown(stats, Path(file).name, detail=detail)
+                out_file = output_dir / f"{stem}-stats.md"
+                out_file.write_text(markdown)
+                click.secho(f"✓ Stats collected: {stats.total_calls} tool calls", fg='green')
+                click.echo(f"  Messages: {stats.user_prompt_count} user, {stats.assistant_turn_count} assistant")
+                click.echo(f"  Output: {out_file}")
+
+            elif mode == 'intent':
+                from minutes.intent import extract_user_prompts, summarize_intent, format_intent_markdown
+                prompts = extract_user_prompts(file, strict=strict)
+
+                if not prompts:
+                    click.secho("No user prompts found in session.", fg='yellow')
+                    return
+
+                try:
+                    backend, backend_name = get_backend(config)
+                except RuntimeError as e:
+                    click.secho(f"Error: {e}", fg='red', err=True)
+                    sys.exit(2)
+
+                intent = summarize_intent(backend, prompts)
+                markdown = format_intent_markdown(intent)
+                out_file = output_dir / f"{stem}-intent.md"
+                out_file.write_text(markdown)
+
+                if intent.primary_goal:
+                    click.secho(f"✓ Intent summarized: {intent.primary_goal[:80]}", fg='green')
+                else:
+                    click.secho("Warning: LLM summarization failed. Showing extracted prompts only.", fg='yellow', err=True)
+                click.echo(f"  Prompts analyzed: {len(prompts)}")
+                click.echo(f"  Output: {out_file}")
+
+            return  # Don't fall through to extract mode
 
         # Ensure output directory exists
         output_path = Path(config.output_dir)
@@ -517,7 +588,11 @@ def _find_main_sessions(
 @click.option('--sort', type=click.Choice(['date', 'date-asc', 'size', 'size-asc', 'project']), default='date', help='Sort order for sessions')
 @click.option('--raw', is_flag=True, help='Disable noise filters (keep tool results, system reminders, etc.)')
 @click.option('--verbose', '-v', is_flag=True, help='Verbose output')
-def batch(project: str | None, since: str | None, min_size: str, output: str | None, dry_run: bool, no_embed: bool, sort: str, raw: bool, verbose: bool) -> None:  # noqa: D103
+@click.option('--mode', type=click.Choice(['extract', 'changes', 'intent', 'stats']), default='extract', help='Extraction mode: extract (default knowledge extraction), changes (code change timeline), intent (user goal summary), stats (tool call statistics)')
+@click.option('--detail', is_flag=True, help='Include full tool call log (only with --mode stats)')
+@click.option('--full', is_flag=True, help='Disable output truncation (only with --mode changes)')
+@click.option('--strict', is_flag=True, help='Fail on malformed JSONL instead of skipping bad lines')
+def batch(project: str | None, since: str | None, min_size: str, output: str | None, dry_run: bool, no_embed: bool, sort: str, raw: bool, verbose: bool, mode: str, detail: bool, full: bool, strict: bool) -> None:  # noqa: D103
     """Batch process historical session transcripts.
 
     Scans ~/.claude/projects/ for main-thread JSONL files, extracts structured
@@ -571,12 +646,22 @@ def batch(project: str | None, since: str | None, min_size: str, output: str | N
     # Determine output base dir
     output_base = Path(output) if output else Path.home() / ".claude" / "minutes"
 
-    # Get backend once for all extractions
-    try:
-        backend, backend_name = get_backend(config)
-    except RuntimeError as e:
-        click.secho(f"Error: {e}", fg='red', err=True)
-        sys.exit(2)
+    # For structural modes, skip backend entirely
+    if mode in ('changes', 'stats'):
+        backend = None
+        backend_name = "structural"
+    elif mode == 'intent':
+        try:
+            backend, backend_name = get_backend(config)
+        except RuntimeError as e:
+            click.secho(f"Error: {e}", fg='red', err=True)
+            sys.exit(2)
+    else:  # extract
+        try:
+            backend, backend_name = get_backend(config)
+        except RuntimeError as e:
+            click.secho(f"Error: {e}", fg='red', err=True)
+            sys.exit(2)
 
     processed = 0
     skipped = 0
@@ -612,48 +697,85 @@ def batch(project: str | None, since: str | None, min_size: str, output: str | N
         click.echo(f"  Processing: {session_file.name} ({session_file.stat().st_size / 1024:.0f}KB)")
 
         try:
-            batch_filter = NO_FILTERS if raw else None
-            text, metadata = parse_file(str(session_file), filter_config=batch_filter)
-            result = process_transcript(backend, config, text)
+            if mode == 'changes':
+                from minutes.changes import parse_changes, format_changes_markdown
+                timeline = parse_changes(str(session_file), strict=strict)
+                markdown = format_changes_markdown(timeline, session_file.name, full=full)
+                out_file = output_dir / f"{session_file.stem}-changes.md"
+                out_file.write_text(markdown)
+                click.secho(f"    ✓ {timeline.total_edits}e {timeline.total_writes}w", fg='green')
+                processed += 1
 
-            # Write markdown
-            if 'messages' in metadata:
-                content_metric = f"{metadata['messages']} messages"
-            elif 'chars' in metadata:
-                content_metric = f"{metadata['chars']} chars"
-            else:
-                content_metric = "0 items"
+            elif mode == 'stats':
+                from minutes.changes import collect_stats, format_stats_markdown
+                stats_result = collect_stats(str(session_file), detail=detail, strict=strict)
+                markdown = format_stats_markdown(stats_result, session_file.name, detail=detail)
+                out_file = output_dir / f"{session_file.stem}-stats.md"
+                out_file.write_text(markdown)
+                click.secho(f"    ✓ {stats_result.total_calls} calls", fg='green')
+                processed += 1
 
-            markdown_path = write_session_markdown(
-                result=result,
-                metadata={'content_metric': content_metric, **metadata},
-                output_dir=str(output_dir),
-                file_hash=file_hash,
-                input_file=session_file.name,
-                backend_name=backend_name,
-            )
+            elif mode == 'intent':
+                from minutes.intent import extract_user_prompts, summarize_intent, format_intent_markdown
+                prompts = extract_user_prompts(str(session_file), strict=strict)
+                if not prompts:
+                    click.secho(f"    Skip (no prompts)", fg='yellow')
+                    skipped += 1
+                else:
+                    try:
+                        intent = summarize_intent(backend, prompts)
+                        markdown = format_intent_markdown(intent)
+                        out_file = output_dir / f"{session_file.stem}-intent.md"
+                        out_file.write_text(markdown)
+                        click.secho(f"    ✓ {intent.primary_goal[:60] if intent.primary_goal else 'no goal'}", fg='green')
+                        processed += 1
+                    except Exception as e:
+                        click.secho(f"    Warning: LLM failed for {session_file.name}: {e}", fg='yellow', err=True)
+                        skipped += 1
 
-            # Index in store
-            store.upsert_session(
-                session_id=session_id,
-                project_key=project_key,
-                input_file=str(session_file.resolve()),
-                result=result,
-                output_file=markdown_path,
-                file_hash=file_hash,
-                file_size=session_file.stat().st_size,
-                message_count=metadata.get('messages', 0),
-                transcript_chars=metadata.get('chars', 0),
-            )
+            else:  # extract — existing behavior
+                batch_filter = NO_FILTERS if raw else None
+                text, metadata = parse_file(str(session_file), filter_config=batch_filter)
+                result = process_transcript(backend, config, text)
 
-            # Record in dedup
-            dedup.record(file_hash, markdown_path, input_file=str(session_file))
+                # Write markdown
+                if 'messages' in metadata:
+                    content_metric = f"{metadata['messages']} messages"
+                elif 'chars' in metadata:
+                    content_metric = f"{metadata['chars']} chars"
+                else:
+                    content_metric = "0 items"
 
-            counts = (f"{len(result.decisions)}d {len(result.ideas)}i "
-                      f"{len(result.questions)}q {len(result.action_items)}a "
-                      f"{len(result.concepts)}c {len(result.terms)}t")
-            click.secho(f"    ✓ {counts}", fg='green')
-            processed += 1
+                markdown_path = write_session_markdown(
+                    result=result,
+                    metadata={'content_metric': content_metric, **metadata},
+                    output_dir=str(output_dir),
+                    file_hash=file_hash,
+                    input_file=session_file.name,
+                    backend_name=backend_name,
+                )
+
+                # Index in store
+                store.upsert_session(
+                    session_id=session_id,
+                    project_key=project_key,
+                    input_file=str(session_file.resolve()),
+                    result=result,
+                    output_file=markdown_path,
+                    file_hash=file_hash,
+                    file_size=session_file.stat().st_size,
+                    message_count=metadata.get('messages', 0),
+                    transcript_chars=metadata.get('chars', 0),
+                )
+
+                # Record in dedup
+                dedup.record(file_hash, markdown_path, input_file=str(session_file))
+
+                counts = (f"{len(result.decisions)}d {len(result.ideas)}i "
+                          f"{len(result.questions)}q {len(result.action_items)}a "
+                          f"{len(result.concepts)}c {len(result.terms)}t")
+                click.secho(f"    ✓ {counts}", fg='green')
+                processed += 1
 
         except Exception as e:
             click.secho(f"    Error: {e}", fg='red', err=True)
@@ -661,8 +783,8 @@ def batch(project: str | None, since: str | None, min_size: str, output: str | N
 
         store.close()
 
-    # Embed all unembedded items across all project stores
-    if not no_embed and processed > 0:
+    # Embed all unembedded items across all project stores (only for extract mode)
+    if not no_embed and processed > 0 and mode == 'extract':
         from minutes import embeddings as emb
         from minutes.embeddings import DEFAULT_MODEL
         hf_id = emb.MODELS[DEFAULT_MODEL][0]
