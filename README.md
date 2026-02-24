@@ -31,12 +31,12 @@ See output in `./output/`:
 
 `minutes` uses a local LLM for extraction. You need an OpenAI-compatible inference endpoint:
 
-- **model-gateway** (recommended for local): [github.com/danieliser/model-gateway](https://github.com/danieliser/model-gateway) — unified gateway for MLX, llama.cpp, Ollama, vLLM
 - **Ollama**: [ollama.com](https://ollama.com) — simple local LLM runner
 - **LM Studio**: [lmstudio.ai](https://lmstudio.ai) — GUI-based local inference
+- **vLLM**: [docs.vllm.ai](https://docs.vllm.ai) — high-throughput serving engine
 - **OpenAI API** or any OpenAI-compatible provider (set `GATEWAY_URL` env var)
 
-For best results: use `model-gateway` with a 4B–7B model (e.g., Qwen 3.5 4B, Llama 2 7B).
+For best results: use a 4B–7B model (e.g., Qwen 2.5 7B, Llama 3 8B).
 
 ## Installation
 
