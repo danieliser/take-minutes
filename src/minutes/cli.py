@@ -11,7 +11,7 @@ import click
 from minutes.config import load_config
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -121,6 +121,7 @@ def setup():
 @click.option('--project', type=str, default=None, help='Filter by project key')
 @click.option('--since', type=str, default=None, help='Only files modified after (ISO date or 2w/7d/30d)')
 @click.option('--min-size', type=str, default='10KB', help='Skip files smaller than this')
+@click.option('--max-size', type=str, default=None, help='Skip files larger than this (e.g. 10MB)')
 @click.option('--output', '-o', type=click.Path(), default=None, help='Output base directory')
 @click.option('--dry-run', is_flag=True, help='Show what would be processed')
 @click.option('--no-embed', is_flag=True, help='Skip embedding generation')
@@ -131,10 +132,11 @@ def setup():
 @click.option('--detail', is_flag=True, help='Include full tool call log (--mode stats only)')
 @click.option('--full', is_flag=True, help='Disable output truncation (--mode changes only)')
 @click.option('--strict', is_flag=True, help='Fail on malformed JSONL')
-def batch(project, since, min_size, output, dry_run, no_embed, sort, raw, verbose, mode, detail, full, strict):
+@click.option('--chunk-size', type=int, default=None, help='Override chunk size (disables sliding tiers)')
+def batch(project, since, min_size, max_size, output, dry_run, no_embed, sort, raw, verbose, mode, detail, full, strict, chunk_size):
     """Batch process historical session transcripts."""
     from minutes.cli_batch import handle_batch
-    handle_batch(project, since, min_size, output, dry_run, no_embed, sort, raw, verbose, mode, detail, full, strict)
+    handle_batch(project, since, min_size, max_size, output, dry_run, no_embed, sort, raw, verbose, mode, detail, full, strict, chunk_size)
 
 
 @main.command()

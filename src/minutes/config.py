@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -55,6 +56,15 @@ def _parse_bool(value: str | None) -> bool:
     return value.lower() in ("true", "1", "yes", "on")
 
 
+# Default sliding chunk tiers: (file_size_threshold_bytes, chunk_size_chars)
+DEFAULT_CHUNK_TIERS: list[tuple[float, int]] = [
+    (1_000_000, 12_000),        # <1MB: 12K (current default)
+    (10_000_000, 18_000),       # <10MB: 18K
+    (50_000_000, 24_000),       # <50MB: 24K
+    (math.inf, 24_000),         # 50MB+: 24K (capped for Qwen 32K context)
+]
+
+
 @dataclass
 class Config:
     """Configuration for minutes CLI."""
@@ -69,6 +79,21 @@ class Config:
     chunk_overlap: int = 200
     max_retries: int = 3
     verbose: bool = False
+    chunk_size_override: bool = False
+    chunk_tiers: list[tuple[float, int]] = field(default_factory=lambda: list(DEFAULT_CHUNK_TIERS))
+
+    def get_chunk_size(self, file_size_bytes: int) -> int:
+        """Get effective chunk size based on file size tiers.
+
+        If max_chunk_size was explicitly set (via CLI or env), returns that
+        value directly. Otherwise walks the tier table.
+        """
+        if self.chunk_size_override:
+            return self.max_chunk_size
+        for threshold, chunk_size in self.chunk_tiers:
+            if file_size_bytes < threshold:
+                return chunk_size
+        return self.chunk_tiers[-1][1]
 
 
 def load_config() -> Config:  # noqa: D103

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
+from typing import Any
 
 import openai
 
@@ -124,31 +126,94 @@ def process_transcript(
     backend: GatewayBackend,
     config: Config,
     transcript: str,
+    *,
+    file_size: int = 0,
+    session_id: str = "",
+    file_hash: str = "",
+    store: Any | None = None,
+    on_chunk_done: Callable | None = None,
+    on_chunks_ready: Callable[[int, int], None] | None = None,
 ) -> ExtractionResult:  # noqa: D103
-    """Process transcript, chunking if necessary and merging results."""
+    """Process transcript, chunking if necessary and merging results.
+
+    Args:
+        backend: LLM backend for extraction.
+        config: Configuration object.
+        transcript: Full transcript text.
+        file_size: Original file size in bytes (for chunk tier selection).
+        session_id: Session ID (for resume support).
+        file_hash: File hash (for resume support).
+        store: MinutesStore instance (for resume support).
+        on_chunk_done: Callback invoked after each chunk extraction.
+        on_chunks_ready: Callback(total_chunks, already_completed) once chunk count is known.
+    """
     if not transcript:
         return ExtractionResult()
 
-    if len(transcript) <= config.max_chunk_size:
+    effective_chunk_size = config.get_chunk_size(file_size) if file_size else config.max_chunk_size
+
+    if len(transcript) <= effective_chunk_size:
+        if on_chunks_ready:
+            on_chunks_ready(1, 0)
         result = extract_structured(backend, config, transcript)
+        if on_chunk_done:
+            on_chunk_done()
         return cleanup_result(result, transcript)
 
     chunks = chunk_transcript(
-        transcript, config.max_chunk_size, config.chunk_overlap
+        transcript, effective_chunk_size, config.chunk_overlap
     )
+    total_chunks = len(chunks)
 
-    results = []
+    # Resume: load previously completed chunks
+    completed: dict[int, ExtractionResult] = {}
+    if store and session_id and file_hash:
+        prior = store.get_chunk_progress(session_id, file_hash)
+        if prior and prior[0]["total_chunks"] == total_chunks and prior[0]["chunk_size"] == effective_chunk_size:
+            for row in prior:
+                completed[row["chunk_index"]] = ExtractionResult(**json.loads(row["result_json"]))
+            if config.verbose:
+                logger.info(f"Resuming: {len(completed)}/{total_chunks} chunks already done")
+        elif prior:
+            # Chunk params changed (file grew or tier changed) — discard partial
+            store.clear_chunk_progress(session_id, file_hash)
+            if config.verbose:
+                logger.info("Chunk parameters changed, discarding partial progress")
+
+    if on_chunks_ready:
+        on_chunks_ready(total_chunks, len(completed))
+
+    results: list[ExtractionResult] = []
     for i, chunk in enumerate(chunks):
+        if i in completed:
+            results.append(completed[i])
+            if on_chunk_done:
+                on_chunk_done()
+            continue
+
         if config.verbose:
-            logger.info(f"Processing chunk {i + 1}/{len(chunks)}")
+            logger.info(f"Processing chunk {i + 1}/{total_chunks}")
 
         result = extract_structured(backend, config, chunk)
         results.append(result)
+
+        # Save chunk progress for resume
+        if store and session_id and file_hash:
+            store.save_chunk_result(
+                session_id, file_hash, i, effective_chunk_size, total_chunks, result,
+            )
+
+        if on_chunk_done:
+            on_chunk_done()
+
+    # Clear chunk progress on successful completion
+    if store and session_id and file_hash:
+        store.clear_chunk_progress(session_id, file_hash)
 
     merged = merge_results(results)
     merged = cleanup_result(merged, transcript)
 
     if config.verbose:
-        logger.info(f"Merged {len(chunks)} chunks into final result")
+        logger.info(f"Merged {total_chunks} chunks into final result")
 
     return merged

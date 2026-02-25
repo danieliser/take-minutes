@@ -18,20 +18,25 @@ def parse_since(since: str) -> datetime:
     return datetime.fromisoformat(since)
 
 
-def parse_min_size(min_size: str) -> int:
-    """Parse --min-size value like '10KB' -> 10240."""
-    size_match = re.match(r'^(\d+)\s*(KB|MB|B)?$', min_size, re.IGNORECASE)
+def parse_size(size_str: str) -> int:
+    """Parse a human size string like '10KB', '1.5MB', '2GB' -> bytes."""
+    size_match = re.match(r'^([\d.]+)\s*(KB|MB|GB|B)?$', size_str, re.IGNORECASE)
     if size_match:
-        n = int(size_match.group(1))
+        n = float(size_match.group(1))
         unit = (size_match.group(2) or 'B').upper()
-        return n * {'B': 1, 'KB': 1024, 'MB': 1024 * 1024}[unit]
+        return int(n * {'B': 1, 'KB': 1024, 'MB': 1024 * 1024, 'GB': 1024 ** 3}[unit])
     return 10240
+
+
+# Backward compat alias
+parse_min_size = parse_size
 
 
 def find_main_sessions(
     projects_dir: Path,
     since: datetime | None = None,
     min_size: int = 10240,
+    max_size: int | None = None,
     project_filter: str | None = None,
     sort: str = "date",
 ) -> list[tuple[str, Path]]:
@@ -56,6 +61,8 @@ def find_main_sessions(
             except OSError:
                 continue
             if stat.st_size < min_size:
+                continue
+            if max_size and stat.st_size > max_size:
                 continue
             if since and datetime.fromtimestamp(stat.st_mtime) < since:
                 continue

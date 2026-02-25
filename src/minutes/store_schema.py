@@ -79,6 +79,17 @@ def init_schema(conn: sqlite3.Connection) -> None:
             PRIMARY KEY (item_id, model)
         );
 
+        CREATE TABLE IF NOT EXISTS chunk_progress (
+            session_id TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            chunk_size INTEGER NOT NULL,
+            total_chunks INTEGER NOT NULL,
+            result_json TEXT NOT NULL,
+            extracted_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, file_hash, chunk_index)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_items_session ON items(session_id);
         CREATE INDEX IF NOT EXISTS idx_items_category ON items(category);
         CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_key);

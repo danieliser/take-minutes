@@ -265,5 +265,48 @@ class MinutesStore:
         """).fetchone()
         return dict(row) if row else {}
 
+    # --- Chunk progress for resume support ---
+
+    def get_chunk_progress(self, session_id: str, file_hash: str) -> list[dict[str, Any]]:
+        """Get completed chunk indices + results for a partial extraction."""
+        rows = self.conn.execute(
+            "SELECT chunk_index, chunk_size, total_chunks, result_json FROM chunk_progress "
+            "WHERE session_id = ? AND file_hash = ? ORDER BY chunk_index",
+            (session_id, file_hash),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_chunk_result(
+        self, session_id: str, file_hash: str,
+        chunk_index: int, chunk_size: int, total_chunks: int,
+        result: ExtractionResult,
+    ) -> None:
+        """Save a single chunk's extraction result for resume."""
+        import json
+        self.conn.execute(
+            "INSERT OR REPLACE INTO chunk_progress "
+            "(session_id, file_hash, chunk_index, chunk_size, total_chunks, result_json, extracted_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, file_hash, chunk_index, chunk_size, total_chunks,
+             json.dumps(result.model_dump()), datetime.now().isoformat()),
+        )
+        self.conn.commit()
+
+    def clear_chunk_progress(self, session_id: str, file_hash: str) -> None:
+        """Remove chunk progress after successful full extraction."""
+        self.conn.execute(
+            "DELETE FROM chunk_progress WHERE session_id = ? AND file_hash = ?",
+            (session_id, file_hash),
+        )
+        self.conn.commit()
+
+    def has_partial_progress(self, session_id: str, file_hash: str) -> bool:
+        """Check if there's any partial chunk progress for this session."""
+        row = self.conn.execute(
+            "SELECT 1 FROM chunk_progress WHERE session_id = ? AND file_hash = ? LIMIT 1",
+            (session_id, file_hash),
+        ).fetchone()
+        return row is not None
+
     def close(self) -> None:  # noqa: D102
         self.conn.close()
