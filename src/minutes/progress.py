@@ -18,15 +18,17 @@ from rich.progress import (
 
 
 class BatchProgress:
-    """Dual-bar progress tracker: file-level + chunk-level.
+    """Progress tracker with chunk-based ETA.
 
-    File bar: overall session progress with accurate ETA.
-    Chunk bar: per-file chunk progress (only shown for multi-chunk files).
+    Main bar: global chunk progress across all files (drives the ETA).
+    Info line: file count shown in description text.
+    Per-file bar: chunk progress within current file (transient).
     """
 
-    def __init__(self, total_files: int) -> None:
+    def __init__(self, total_files: int, estimated_chunks: int = 0) -> None:
         self.enabled = sys.stderr.isatty()
         self.total_files = total_files
+        self.files_done = 0
         if not self.enabled:
             return
 
@@ -41,48 +43,67 @@ class BatchProgress:
             TimeRemainingColumn(),
             console=self.console,
         )
-        self.file_task = self.progress.add_task("Files", total=total_files)
+        # Main bar: total estimated chunks (drives ETA)
+        self.main_task = self.progress.add_task(
+            self._main_desc(),
+            total=max(estimated_chunks, 1),
+        )
+        # Per-file chunk bar (created/removed per file)
         self.chunk_task_id: int | None = None
+        self._estimated_chunks = estimated_chunks
 
-    def start_file(self, filename: str, total_chunks: int, completed_chunks: int = 0) -> None:
+    def _main_desc(self, filename: str | None = None) -> str:
+        label = f"File {self.files_done + 1}/{self.total_files}"
+        if filename:
+            short = filename[:30] if len(filename) > 30 else filename
+            return f"{label}  {short}"
+        return label
+
+    def start_file(
+        self, filename: str, total_chunks: int, completed_chunks: int = 0,
+    ) -> None:
         """Begin tracking a new file's chunk extraction."""
         if not self.enabled:
             return
-        # Update file bar description to show current file
-        short = filename[:40] if len(filename) > 40 else filename
-        self.progress.update(self.file_task, description=f"Files  ({short})")
+        self.progress.update(
+            self.main_task, description=self._main_desc(filename),
+        )
 
-        # Only show chunk bar for multi-chunk files
+        # Per-file chunk bar for multi-chunk files
         if total_chunks > 1:
             if self.chunk_task_id is not None:
                 self.progress.remove_task(self.chunk_task_id)
             self.chunk_task_id = self.progress.add_task(
-                f"  Chunks", total=total_chunks, completed=completed_chunks,
+                "  Chunks",
+                total=total_chunks, completed=completed_chunks,
             )
         else:
-            # Single chunk — no chunk bar needed
             if self.chunk_task_id is not None:
                 self.progress.remove_task(self.chunk_task_id)
                 self.chunk_task_id = None
 
     def advance_chunk(self) -> None:
-        """Mark one chunk as complete."""
-        if not self.enabled or self.chunk_task_id is None:
+        """Mark one chunk as complete (advances both main and per-file bars)."""
+        if not self.enabled:
             return
-        self.progress.advance(self.chunk_task_id)
+        self.progress.advance(self.main_task)
+        if self.chunk_task_id is not None:
+            self.progress.advance(self.chunk_task_id)
 
     def finish_file(self) -> None:
         """Mark current file as complete."""
         if not self.enabled:
             return
+        self.files_done += 1
         if self.chunk_task_id is not None:
             self.progress.remove_task(self.chunk_task_id)
             self.chunk_task_id = None
-        self.progress.update(self.file_task, description="Files")
-        self.progress.advance(self.file_task)
+        self.progress.update(
+            self.main_task, description=self._main_desc(),
+        )
 
     def log(self, message: str) -> None:
-        """Print a message above the progress bars without breaking the display."""
+        """Print a message above the progress bars."""
         if self.enabled:
             self.progress.print(message)
         else:
@@ -98,6 +119,19 @@ class BatchProgress:
     def __exit__(self, *args: object) -> None:
         if self.enabled:
             self.progress.stop()
+
+
+def estimate_chunks(file_size: int, chunk_size: int) -> int:
+    """Estimate number of chunks from raw file size.
+
+    JSONL files have ~3x overhead vs extracted text (JSON keys, tool calls,
+    metadata lines). So transcript_chars ≈ file_size / 3.
+    """
+    transcript_estimate = file_size // 3
+    if transcript_estimate <= chunk_size:
+        return 1
+    # Account for overlap reducing effective chunk size
+    return max(1, -(-transcript_estimate // chunk_size))  # ceil division
 
 
 def _suppress_noisy_loggers() -> None:
