@@ -21,14 +21,16 @@ class BatchProgress:
     """Progress tracker with chunk-based ETA.
 
     Main bar: global chunk progress across all files (drives the ETA).
-    Info line: file count shown in description text.
     Per-file bar: chunk progress within current file (transient).
+    Total adjusts as real chunk counts replace estimates.
     """
 
     def __init__(self, total_files: int, estimated_chunks: int = 0) -> None:
         self.enabled = sys.stderr.isatty()
         self.total_files = total_files
         self.files_done = 0
+        self._running_total = estimated_chunks
+        self._current_file_estimate = 0
         if not self.enabled:
             return
 
@@ -43,14 +45,11 @@ class BatchProgress:
             TimeRemainingColumn(),
             console=self.console,
         )
-        # Main bar: total estimated chunks (drives ETA)
         self.main_task = self.progress.add_task(
             self._main_desc(),
             total=max(estimated_chunks, 1),
         )
-        # Per-file chunk bar (created/removed per file)
         self.chunk_task_id: int | None = None
-        self._estimated_chunks = estimated_chunks
 
     def _main_desc(self, filename: str | None = None) -> str:
         label = f"File {self.files_done + 1}/{self.total_files}"
@@ -59,17 +58,32 @@ class BatchProgress:
             return f"{label}  {short}"
         return label
 
+    def set_file_estimate(self, estimated: int) -> None:
+        """Set the estimated chunk count for the upcoming file.
+
+        Called before start_file so we can compute the delta when the
+        real count arrives.
+        """
+        self._current_file_estimate = estimated
+
     def start_file(
         self, filename: str, total_chunks: int, completed_chunks: int = 0,
     ) -> None:
         """Begin tracking a new file's chunk extraction."""
         if not self.enabled:
             return
+
+        # Adjust main bar total: replace estimate with actual
+        delta = total_chunks - self._current_file_estimate
+        if delta != 0:
+            self._running_total += delta
+            self.progress.update(self.main_task, total=self._running_total)
+        self._current_file_estimate = 0
+
         self.progress.update(
             self.main_task, description=self._main_desc(filename),
         )
 
-        # Per-file chunk bar for multi-chunk files
         if total_chunks > 1:
             if self.chunk_task_id is not None:
                 self.progress.remove_task(self.chunk_task_id)
@@ -122,15 +136,15 @@ class BatchProgress:
 
 
 def estimate_chunks(file_size: int, chunk_size: int) -> int:
-    """Estimate number of chunks from raw file size.
+    """Estimate number of chunks from raw JSONL file size.
 
-    JSONL files have ~3x overhead vs extracted text (JSON keys, tool calls,
-    metadata lines). So transcript_chars ≈ file_size / 3.
+    JSONL overhead is roughly 2x vs extracted text content (JSON structure,
+    tool call metadata, system messages filtered out). Using 2x is slightly
+    conservative — better to overestimate chunks than underestimate.
     """
-    transcript_estimate = file_size // 3
+    transcript_estimate = file_size // 2
     if transcript_estimate <= chunk_size:
         return 1
-    # Account for overlap reducing effective chunk size
     return max(1, -(-transcript_estimate // chunk_size))  # ceil division
 
 

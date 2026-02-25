@@ -160,6 +160,12 @@ def handle_batch(
                     _batch_review(session_file, output_dir, backend, strict)
                     processed += 1
                 else:  # extract
+                    file_est = estimate_chunks(
+                        session_file.stat().st_size,
+                        config.get_chunk_size(session_file.stat().st_size),
+                    )
+                    bp.set_file_estimate(file_est)
+
                     def _on_chunks_ready(total: int, done: int) -> None:
                         bp.start_file(session_file.name, total, done)
 
