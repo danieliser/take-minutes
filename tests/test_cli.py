@@ -17,7 +17,7 @@ class TestProcessCommand:
 
     def test_process_valid_file(self, tmp_path):
         """Process a valid text file with mocked backend."""
-        with patch('minutes.cli.get_backend') as mock_get_backend:
+        with patch('minutes.cli_process.get_backend') as mock_get_backend:
             # Create mock backend
             mock_backend = Mock()
             extraction_result = ExtractionResult(
@@ -54,7 +54,7 @@ class TestProcessCommand:
 
     def test_process_with_no_dedup_flag(self, tmp_path):
         """Process with --no-dedup flag."""
-        with patch('minutes.cli.get_backend') as mock_get_backend:
+        with patch('minutes.cli_process.get_backend') as mock_get_backend:
             mock_backend = Mock()
             extraction_result = ExtractionResult(
                 decisions=[],
@@ -78,7 +78,7 @@ class TestProcessCommand:
 
     def test_process_with_verbose_flag(self, tmp_path):
         """Process with --verbose flag."""
-        with patch('minutes.cli.get_backend') as mock_get_backend:
+        with patch('minutes.cli_process.get_backend') as mock_get_backend:
             mock_backend = Mock()
             extraction_result = ExtractionResult(
                 decisions=[],

@@ -7,11 +7,15 @@ from unittest.mock import Mock, patch, MagicMock
 from minutes.extractor import (
     GatewayBackend,
     get_backend,
-    extract_json_block,
-    chunk_transcript,
-    merge_results,
     extract_structured,
     process_transcript,
+)
+from minutes.extractor_chunking import (
+    extract_json_block,
+    chunk_transcript,
+)
+from minutes.extractor_dedup import (
+    merge_results,
 )
 from minutes.models import ExtractionResult, Decision, Idea, Question, ActionItem, Concept, Term
 from minutes.config import Config
