@@ -118,7 +118,19 @@ def search_vector(
 
 
 def _rrf_merge(ranked_lists: list[list[dict[str, Any]]], k: int = 60) -> list[dict[str, Any]]:
-    """Reciprocal Rank Fusion — merge multiple ranked lists."""
+    """Reciprocal Rank Fusion — merge multiple ranked lists.
+
+    When only one list is provided, returns items with their native scores
+    preserved (as ``rrf_score``) instead of flattening to positional reciprocals.
+    """
+    if len(ranked_lists) == 1:
+        output = []
+        for item in ranked_lists[0]:
+            result = item.copy()
+            result["rrf_score"] = item.get("score", 0.0)
+            output.append(result)
+        return output
+
     score_map: dict[int, float] = {}
     item_map: dict[int, dict[str, Any]] = {}
 
