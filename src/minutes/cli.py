@@ -140,6 +140,15 @@ def batch(project, since, min_size, max_size, output, dry_run, no_embed, sort, r
 
 
 @main.command()
+@click.option('--output', '-o', type=click.Path(), default=None, help='Minutes base directory')
+def embed(output):
+    """Generate embeddings for all unembedded items."""
+    from minutes.cli_batch import _generate_embeddings
+    output_base = Path(output) if output else Path.home() / ".claude" / "minutes"
+    _generate_embeddings(output_base)
+
+
+@main.command()
 @click.argument('query')
 @click.option('--project', type=str, default=None, help='Filter by project key')
 @click.option('--category', type=str, default=None, help='Filter by category')

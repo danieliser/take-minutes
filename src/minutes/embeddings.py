@@ -1,4 +1,4 @@
-"""Embedding client with tiered models: fast (mpnet) and quality (Qwen3)."""
+"""Embedding client with tiered models: fast (mxbai) and quality (Qwen3)."""
 
 from __future__ import annotations
 
@@ -15,9 +15,10 @@ logger = logging.getLogger(__name__)
 
 # Model registry — name → (hf_id, dims, description)
 MODELS = {
-    "fast": ("all-mpnet-base-v2", 768, "Fast, good quality, 109M params"),
+    "fast": ("mixedbread-ai/mxbai-embed-large-v1", 1024, "SOTA retrieval, MRL support, 335M params"),
     "quality": ("Qwen/Qwen3-Embedding-0.6B", 1024, "Best-in-class, instruction-aware, 600M params"),
-    # Legacy alias
+    # Legacy aliases
+    "mpnet": ("all-mpnet-base-v2", 768, "Legacy default, 109M params"),
     "minilm": ("all-MiniLM-L6-v2", 384, "Lightweight, 22M params"),
 }
 

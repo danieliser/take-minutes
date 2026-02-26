@@ -57,6 +57,7 @@ def handle_batch(
 
     output_base = Path(output) if output else Path.home() / ".claude" / "minutes"
 
+    from minutes.progress import estimate_chunks
     from minutes.store import MinutesStore
 
     # Pre-scan: separate already-indexed sessions from pending work
@@ -91,7 +92,17 @@ def handle_batch(
         )
         return
 
-    click.secho(f"{len(pending)} to process, {skipped} already indexed", fg='cyan')
+    # Estimate total chunks for accurate ETA
+    total_estimated_chunks = sum(
+        estimate_chunks(f.stat().st_size, config.get_chunk_size(f.stat().st_size))
+        for _, f, _ in pending
+    )
+
+    click.secho(
+        f"{len(pending)} to process (~{total_estimated_chunks} chunks), "
+        f"{skipped} already indexed",
+        fg='cyan',
+    )
 
     if dry_run:
         for project_key, f, _hash in pending:
@@ -123,7 +134,7 @@ def handle_batch(
     processed = 0
     errors = 0
 
-    with BatchProgress(len(pending)) as bp:
+    with BatchProgress(len(pending), estimated_chunks=total_estimated_chunks) as bp:
         for project_key, session_file, file_hash in pending:
             output_dir = output_base / project_key
             db_path = output_dir / "minutes.db"
@@ -149,6 +160,12 @@ def handle_batch(
                     _batch_review(session_file, output_dir, backend, strict)
                     processed += 1
                 else:  # extract
+                    file_est = estimate_chunks(
+                        session_file.stat().st_size,
+                        config.get_chunk_size(session_file.stat().st_size),
+                    )
+                    bp.set_file_estimate(file_est)
+
                     def _on_chunks_ready(total: int, done: int) -> None:
                         bp.start_file(session_file.name, total, done)
 
